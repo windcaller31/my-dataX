@@ -1,0 +1,57 @@
+{
+"job": {
+    "setting": {
+        "speed": {
+            "channel": 2
+        }
+    },
+    "content": [
+        {
+            "reader": {
+                "name": "mongodbreader",
+                "parameter": {
+                    "address": ["10.10.2.73:6013"],
+                    "userName": "boss",
+                    "userPassword": "JP7Ebqw1iAE8UcwI",
+                    "dbName": "kboe",
+                    "collectionName": "student_profile",
+                    "query" : { _id : 20738084},
+                    "column": [
+                        {
+                          "syncType" : "flatten"
+                        },
+                        {
+                          "name": "_id",
+                          "type": "flatten^Integer"
+                        },{
+                          "name": "subject_pref",
+                          "type": "flatten^ArrayObjectLevelOne"
+                        },{
+                          "name": "subject_pref^subject",
+                          "type": "String"
+                        },{
+                          "name": "subject_pref^click_score",
+                          "type": "Double"
+                        },{
+                          "name": "_id",
+                          "type": "String"
+                        },{
+                          "name": "subject_pref^score",
+                          "type": "Double"
+                        }
+                    ]
+                }
+            },
+            "writer": {
+              "name": "txtfilewriter",
+              "parameter": {
+                  "path": "/Users/iyx/alibaba-dataX-updator/DataX/myconfig",
+                  "fileName": "testTxt.txt",
+                  "writeMode": "truncate",
+                  "dateFormat": "yyyy-MM-dd"
+              }
+            }
+        }
+    ]
+}
+  }

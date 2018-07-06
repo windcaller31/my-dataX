@@ -1,0 +1,63 @@
+{
+"job": {
+    "setting": {
+        "speed": {
+            "channel": 2
+        }
+    },
+    "content": [
+        {
+            "reader": {
+                "name": "mongodbreader",
+                "parameter": {
+                    "address": ["10.10.2.73:6013"],
+                    "userName": "boss",
+                    "userPassword": "JP7Ebqw1iAE8UcwI",
+                    "dbName": "kboe",
+                    "collectionName": "student_profile",
+                    "query" : { "_id" : { "$in" : [ 5369905,20738084 ] } },
+                    "column": [
+                        {
+                          "syncType" : "flatten"
+                        },
+                        {
+                          "name": "_id",
+                          "type": "flatten^Integer"
+                        },{
+                          "name": "weak_knowledges",
+                          "type": "flatten^ArrayObjectLevelTwo"
+                        },{
+                          "name": "weak_knowledges^bad_knowledges^lscore",
+                          "type": "Double"
+                        },{
+                          "name": "weak_knowledges^bad_knowledges^id",
+                          "type": "Double"
+                        },{
+                          "name": "_id",
+                          "type": "String"
+                        },{
+                          "name": "weak_knowledges^bad_knowledges^ques_num",
+                          "type": "Double"
+                        },{
+                          "name": "weak_knowledges^subject",
+                          "type": "String"
+                        },{
+                          "name": "weak_knowledges^bad_knowledges^level",
+                          "type": "Double"
+                        }
+                    ]
+                }
+            },
+            "writer": {
+              "name": "txtfilewriter",
+              "parameter": {
+                  "path": "/Users/iyx/alibaba-dataX-updator/DataX/myconfig",
+                  "fileName": "testTxt.txt",
+                  "writeMode": "truncate",
+                  "dateFormat": "yyyy-MM-dd"
+              }
+            }
+        }
+    ]
+}
+  }
