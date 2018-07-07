@@ -6,6 +6,8 @@ import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 
+import com.mongodb.BasicDBObject;
+import com.mongodb.client.FindIterable;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 
@@ -50,7 +52,7 @@ public class MongoDBReader extends Reader {
 
         @Override
         public List<Configuration> split(int adviceNumber) {
-            return CollectionSplitUtil.doSplit(originalConfig,adviceNumber,mongoClient);
+            return CollectionSplitUtil.doSplit(originalConfig, adviceNumber, mongoClient);
         }
 
         @Override
@@ -58,10 +60,10 @@ public class MongoDBReader extends Reader {
             this.originalConfig = super.getPluginJobConf();
             this.userName = originalConfig.getString(KeyConstant.MONGO_USER_NAME, originalConfig.getString(KeyConstant.MONGO_USERNAME));
             this.password = originalConfig.getString(KeyConstant.MONGO_USER_PASSWORD, originalConfig.getString(KeyConstant.MONGO_PASSWORD));
-            String database =  originalConfig.getString(KeyConstant.MONGO_DB_NAME, originalConfig.getString(KeyConstant.MONGO_DATABASE));
-            String authDb =  originalConfig.getString(KeyConstant.MONGO_AUTHDB, database);
-            if(!Strings.isNullOrEmpty(this.userName) && !Strings.isNullOrEmpty(this.password)) {
-                this.mongoClient = MongoUtil.initCredentialMongoClient(originalConfig,userName,password,authDb);
+            String database = originalConfig.getString(KeyConstant.MONGO_DB_NAME, originalConfig.getString(KeyConstant.MONGO_DATABASE));
+            String authDb = originalConfig.getString(KeyConstant.MONGO_AUTHDB, database);
+            if (!Strings.isNullOrEmpty(this.userName) && !Strings.isNullOrEmpty(this.password)) {
+                this.mongoClient = MongoUtil.initCredentialMongoClient(originalConfig, userName, password, authDb);
             } else {
                 this.mongoClient = MongoUtil.initMongoClient(originalConfig);
             }
@@ -97,11 +99,11 @@ public class MongoDBReader extends Reader {
         @Override
         public void startRead(RecordSender recordSender) {
 
-            if(lowerBound== null || upperBound == null ||
-                mongoClient == null || database == null ||
-                collection == null  || mongodbColumnMeta == null) {
+            if (lowerBound == null || upperBound == null ||
+                    mongoClient == null || database == null ||
+                    collection == null || mongodbColumnMeta == null) {
                 throw DataXException.asDataXException(MongoDBReaderErrorCode.ILLEGAL_VALUE,
-                    MongoDBReaderErrorCode.ILLEGAL_VALUE.getDescription());
+                        MongoDBReaderErrorCode.ILLEGAL_VALUE.getDescription());
             }
             MongoDatabase db = mongoClient.getDatabase(database);
             MongoCollection col = db.getCollection(this.collection);
@@ -117,201 +119,134 @@ public class MongoDBReader extends Reader {
             } else {
                 filter.append(KeyConstant.MONGO_PRIMARY_ID, new Document("$gte", isObjectId ? new ObjectId(lowerBound.toString()) : lowerBound).append("$lt", isObjectId ? new ObjectId(upperBound.toString()) : upperBound));
             }
-            if(!Strings.isNullOrEmpty(query)) {
+            if (!Strings.isNullOrEmpty(query)) {
                 Document queryFilter = Document.parse(query);
                 filter = new Document("$and", Arrays.asList(filter, queryFilter));
             }
-            dbCursor = col.find(filter).iterator();
-            
+            FindIterable<Document> documents = col.find(filter);
+
+            // result发送条数阈值 默认10000
+            int threshold = 10000;
+            String send_threshold = readerSliceConfig.getString("send_threshold");
+            if (!Strings.isNullOrEmpty(send_threshold)) {
+                threshold = Integer.valueOf(send_threshold);
+            }
+
+            // 拼凑查询条件
+            String query_params = readerSliceConfig.getString("query_params");
+            if (!Strings.isNullOrEmpty(query_params)) {
+                JSONObject jsonObject = JSONObject.parseObject(query_params);
+                String skip = jsonObject.getString("skip");
+                String limit = jsonObject.getString("limit");
+                BasicDBObject sort = (BasicDBObject) com.mongodb.util.JSON.parse(jsonObject.getString("sort"));
+                BasicDBObject projection = (BasicDBObject) com.mongodb.util.JSON.parse(jsonObject.getString("projection"));
+                if (null != sort) {
+                    documents.sort(sort);
+                }
+                if (!Strings.isNullOrEmpty(skip)) {
+                    documents.skip(Integer.valueOf(skip));
+                }
+                if (!Strings.isNullOrEmpty(limit)) {
+                    documents.limit(Integer.valueOf(limit));
+                }
+                if (null != projection) {
+                    documents.projection(projection);
+                }
+            }
+            dbCursor = documents.iterator();
+
             //先进行拆解
             List<JSONObject> midList = new ArrayList<JSONObject>();
-            JSONObject syncTypeObject = (JSONObject)mongodbColumnMeta.get(0);
+            JSONObject syncTypeObject = (JSONObject) mongodbColumnMeta.get(0);
             String syncType = "normal";
-            if(syncTypeObject.containsKey("syncType")){
-            	syncType = syncTypeObject.getString("syncType");
+            if (syncTypeObject.containsKey("syncType")) {
+                syncType = syncTypeObject.getString("syncType");
             }
             JSONArray newMongodbColumnMeta = new JSONArray();
             JSONArray midMongodbColumnMeta = new JSONArray();
             //扁平化模式
-            if(syncType.equals("flatten")){
-            	for(int i = 1 ; i < mongodbColumnMeta.size();i++){
-            		JSONObject colObject = (JSONObject)mongodbColumnMeta.get(i);
-            		String type = colObject.getString("type");
-            		if(type.startsWith("flatten^")){
-            			JSONObject newMidColObject = new JSONObject();
-            			newMidColObject.put("name", colObject.getString("name"));
-            			newMidColObject.put("type", colObject.getString("type").split("flatten\\^")[1]);
-            			midMongodbColumnMeta.add(newMidColObject);	
-            		}else{
-            			JSONObject newColObject = new JSONObject();
-            			newColObject.put("name", colObject.getString("name"));
-            			newColObject.put("type", colObject.getString("type"));
-            			newMongodbColumnMeta.add(newColObject);
-            		}
-            	}            	
-            	while(dbCursor.hasNext()){
-            		Document item = dbCursor.next();
-            		List<JSONObject> subMidList = new ArrayList<JSONObject>();
-            		JSONObject preJson = new JSONObject();
-            		for(Object column : midMongodbColumnMeta){
-            			JSONObject colObject = (JSONObject)column;
-            			String type = colObject.getString("type");
-            			String name = colObject.getString("name");  
-            			Object nestedObject = item.get(name);
-            			if (nestedObject instanceof Double) {
-            				preJson.put(name, (Double) nestedObject);
-            			} else if (nestedObject instanceof Boolean) {
-            				preJson.put(name, (Boolean) nestedObject);
-            			} else if (nestedObject instanceof Date) {
-            				preJson.put(name, (Date) nestedObject);
-            			} else if (nestedObject instanceof Integer) {
-            				preJson.put(name, (Integer) nestedObject);
-            			} else if (nestedObject instanceof Long) {
-            				preJson.put(name, (Long) nestedObject);
-            			} else if (nestedObject instanceof String) {
-            				preJson.put(name, (String) nestedObject);
-            			} else if (type.equals("ArrayObjectLevelOne")) {
-            				JSONObject originJson = (JSONObject) preJson.clone();
-            				RecursionDocument.getListJson(name, nestedObject, subMidList,  preJson, originJson);
-            			} else if (type.equals("ArrayObjectLevelTwo")){
-            				JSONObject originJson = (JSONObject) preJson.clone();
-            				RecursionDocument.getDoubleListJson(name, nestedObject, subMidList,  preJson, originJson,false);
-            			}
-            			midList.addAll(subMidList);
-            		}
-            	}
-            	//重复代码
-            	for (JSONObject _item : midList) {
-//                    JSONObject item = dbCursor.next();
-            		Document item = Document.parse(_item.toJSONString());
-                    Record record = recordSender.createRecord();
-                    Iterator columnItera = newMongodbColumnMeta.iterator();
-                    while (columnItera.hasNext()) {
-                        JSONObject column = (JSONObject)columnItera.next();
-                        Object tempCol = item.get(column.getString(KeyConstant.COLUMN_NAME));
-                        if (tempCol == null) {
-                            if (KeyConstant.isDocumentType(column.getString(KeyConstant.COLUMN_TYPE))) {
-                                String[] name = column.getString(KeyConstant.COLUMN_NAME).split("\\.");
-                                if (name.length > 1) {
-                                    Object obj;
-                                    Document nestedDocument = item;
-                                    for (String str : name) {
-                                        obj = nestedDocument.get(str);
-                                        if (obj instanceof Document) {
-                                            nestedDocument = (Document) obj;
-                                        }
-                                    }
-
-                                    if (null != nestedDocument) {
-                                        Document doc = nestedDocument;
-                                        tempCol = doc.get(name[name.length - 1]);
-                                    }
-                                }
-                            }
-                        }
-                        if (tempCol == null) {
-                            //continue; 这个不能直接continue会导致record到目的端错位
-                            record.addColumn(new StringColumn(null));
-                        }else if (tempCol instanceof Double) {
-                            //TODO deal with Double.isNaN()
-                            record.addColumn(new DoubleColumn((Double) tempCol));
-                        } else if (tempCol instanceof Boolean) {
-                            record.addColumn(new BoolColumn((Boolean) tempCol));
-                        } else if (tempCol instanceof Date) {
-                            record.addColumn(new DateColumn((Date) tempCol));
-                        } else if (tempCol instanceof Integer) {
-                            record.addColumn(new LongColumn((Integer) tempCol));
-                        }else if (tempCol instanceof Long) {
-                            record.addColumn(new LongColumn((Long) tempCol));
-                        } else {
-                            if(KeyConstant.isArrayType(column.getString(KeyConstant.COLUMN_TYPE))) {
-                                String splitter = column.getString(KeyConstant.COLUMN_SPLITTER);
-                                if(Strings.isNullOrEmpty(splitter)) {
-                                    throw DataXException.asDataXException(MongoDBReaderErrorCode.ILLEGAL_VALUE,
-                                        MongoDBReaderErrorCode.ILLEGAL_VALUE.getDescription());
-                                } else {
-                                    ArrayList array = (ArrayList)tempCol;
-                                    String tempArrayStr = Joiner.on(splitter).join(array);
-                                    record.addColumn(new StringColumn(tempArrayStr));
-                                }
-                            } else {
-                                record.addColumn(new StringColumn(tempCol.toString()));
-                            }
-                        }
+            if (syncType.equals("flatten")) {
+                for (int i = 1; i < mongodbColumnMeta.size(); i++) {
+                    JSONObject colObject = (JSONObject) mongodbColumnMeta.get(i);
+                    String type = colObject.getString("type");
+                    if (type.startsWith("flatten^")) {
+                        JSONObject newMidColObject = new JSONObject();
+                        newMidColObject.put("name", colObject.getString("name"));
+                        newMidColObject.put("type", colObject.getString("type").split("flatten\\^")[1]);
+                        midMongodbColumnMeta.add(newMidColObject);
+                    } else {
+                        JSONObject newColObject = new JSONObject();
+                        newColObject.put("name", colObject.getString("name"));
+                        newColObject.put("type", colObject.getString("type"));
+                        newMongodbColumnMeta.add(newColObject);
                     }
-                    recordSender.sendToWriter(record);
+                }
+                int i = 0;
+                while (dbCursor.hasNext()) {
+                    Document item = dbCursor.next();
+                    List<JSONObject> subMidList = new ArrayList<JSONObject>();
+                    JSONObject preJson = new JSONObject();
+                    for (Object column : midMongodbColumnMeta) {
+                        JSONObject colObject = (JSONObject) column;
+                        String type = colObject.getString("type");
+                        String name = colObject.getString("name");
+                        Object nestedObject = item.get(name);
+                        if (nestedObject instanceof Double) {
+                            preJson.put(name, (Double) nestedObject);
+                        } else if (nestedObject instanceof Boolean) {
+                            preJson.put(name, (Boolean) nestedObject);
+                        } else if (nestedObject instanceof Date) {
+                            preJson.put(name, (Date) nestedObject);
+                        } else if (nestedObject instanceof Integer) {
+                            preJson.put(name, (Integer) nestedObject);
+                        } else if (nestedObject instanceof Long) {
+                            preJson.put(name, (Long) nestedObject);
+                        } else if (nestedObject instanceof String) {
+                            preJson.put(name, (String) nestedObject);
+                        } else if (type.equals("ArrayObjectLevelOne")) {
+                            JSONObject originJson = (JSONObject) preJson.clone();
+                            RecursionDocument.getListJson(name, nestedObject, subMidList, preJson, originJson);
+                        } else if (type.equals("ArrayObjectLevelTwo")) {
+                            JSONObject originJson = (JSONObject) preJson.clone();
+                            RecursionDocument.getDoubleListJson(name, nestedObject, subMidList, preJson, originJson, false);
+                        }
+                        midList.addAll(subMidList);
+                    }
+                    i++;
+                    if (i % threshold == 0) {
+                        for (JSONObject _item : midList) {
+                            Document doc = Document.parse(_item.toJSONString());
+                            resultSendToWriter(recordSender, newMongodbColumnMeta, doc);
+                        }
+                        midList.clear();
+                    }
+                }
+                if (midList.size() != 0) {
+                    for (JSONObject _item : midList) {
+                        Document doc = Document.parse(_item.toJSONString());
+                        resultSendToWriter(recordSender, newMongodbColumnMeta, doc);
+                    }
+                }
+
+               /* //重复代码
+                for (JSONObject _item : midList) {
+                    JSONObject item = dbCursor.next();
+                    Document item = Document.parse(_item.toJSONString());
+                }*/
+            }
+
+            //一般化模式
+            if (syncType.equals("normal")) {
+                for (int i = 1; i < mongodbColumnMeta.size(); i++) {
+                    Object colObject = mongodbColumnMeta.get(i);
+                    newMongodbColumnMeta.add(colObject);
+                }
+                //重复代码
+                while (dbCursor.hasNext()) {
+                    Document item = dbCursor.next();
+                    resultSendToWriter(recordSender, newMongodbColumnMeta, item);
                 }
             }
-            
-            //一般化模式
-            if(syncType.equals("normal")){
-            	for(int i = 1 ; i < mongodbColumnMeta.size();i++){
-            		Object colObject = mongodbColumnMeta.get(i);
-            		newMongodbColumnMeta.add(colObject);
-            	}
-            	//重复代码
-            	while (dbCursor.hasNext()) {
-                    Document item = dbCursor.next();
-                    Record record = recordSender.createRecord();
-                    Iterator columnItera = newMongodbColumnMeta.iterator();
-                    while (columnItera.hasNext()) {
-                        JSONObject column = (JSONObject)columnItera.next();
-                        Object tempCol = item.get(column.getString(KeyConstant.COLUMN_NAME));
-                        if (tempCol == null) {
-                            if (KeyConstant.isDocumentType(column.getString(KeyConstant.COLUMN_TYPE))) {
-                                String[] name = column.getString(KeyConstant.COLUMN_NAME).split("\\.");
-                                if (name.length > 1) {
-                                    Object obj;
-                                    Document nestedDocument = item;
-                                    for (String str : name) {
-                                        obj = nestedDocument.get(str);
-                                        if (obj instanceof Document) {
-                                            nestedDocument = (Document) obj;
-                                        }
-                                    }
-
-                                    if (null != nestedDocument) {
-                                        Document doc = nestedDocument;
-                                        tempCol = doc.get(name[name.length - 1]);
-                                    }
-                                }
-                            }
-                        }
-                        if (tempCol == null) {
-                            //continue; 这个不能直接continue会导致record到目的端错位
-                            record.addColumn(new StringColumn(null));
-                        }else if (tempCol instanceof Double) {
-                            //TODO deal with Double.isNaN()
-                            record.addColumn(new DoubleColumn((Double) tempCol));
-                        } else if (tempCol instanceof Boolean) {
-                            record.addColumn(new BoolColumn((Boolean) tempCol));
-                        } else if (tempCol instanceof Date) {
-                            record.addColumn(new DateColumn((Date) tempCol));
-                        } else if (tempCol instanceof Integer) {
-                            record.addColumn(new LongColumn((Integer) tempCol));
-                        }else if (tempCol instanceof Long) {
-                            record.addColumn(new LongColumn((Long) tempCol));
-                        } else {
-                            if(KeyConstant.isArrayType(column.getString(KeyConstant.COLUMN_TYPE))) {
-                                String splitter = column.getString(KeyConstant.COLUMN_SPLITTER);
-                                if(Strings.isNullOrEmpty(splitter)) {
-                                    throw DataXException.asDataXException(MongoDBReaderErrorCode.ILLEGAL_VALUE,
-                                        MongoDBReaderErrorCode.ILLEGAL_VALUE.getDescription());
-                                } else {
-                                    ArrayList array = (ArrayList)tempCol;
-                                    String tempArrayStr = Joiner.on(splitter).join(array);
-                                    record.addColumn(new StringColumn(tempArrayStr));
-                                }
-                            } else {
-                                record.addColumn(new StringColumn(tempCol.toString()));
-                            }
-                        }
-                    }
-                    recordSender.sendToWriter(record);
-                }
-            }          
-
-            
         }
 
         @Override
@@ -321,8 +256,8 @@ public class MongoDBReader extends Reader {
             this.password = readerSliceConfig.getString(KeyConstant.MONGO_USER_PASSWORD, readerSliceConfig.getString(KeyConstant.MONGO_PASSWORD));
             this.database = readerSliceConfig.getString(KeyConstant.MONGO_DB_NAME, readerSliceConfig.getString(KeyConstant.MONGO_DATABASE));
             this.authDb = readerSliceConfig.getString(KeyConstant.MONGO_AUTHDB, this.database);
-            if(!Strings.isNullOrEmpty(userName) && !Strings.isNullOrEmpty(password)) {
-                mongoClient = MongoUtil.initCredentialMongoClient(readerSliceConfig,userName,password,authDb);
+            if (!Strings.isNullOrEmpty(userName) && !Strings.isNullOrEmpty(password)) {
+                mongoClient = MongoUtil.initCredentialMongoClient(readerSliceConfig, userName, password, authDb);
             } else {
                 mongoClient = MongoUtil.initMongoClient(readerSliceConfig);
             }
@@ -340,5 +275,63 @@ public class MongoDBReader extends Reader {
 
         }
 
+        // 将结果发送
+        private void resultSendToWriter(RecordSender recordSender, JSONArray newMongodbColumnMeta, Document item) {
+            Record record = recordSender.createRecord();
+            Iterator columnItera = newMongodbColumnMeta.iterator();
+            while (columnItera.hasNext()) {
+                JSONObject column = (JSONObject) columnItera.next();
+                Object tempCol = item.get(column.getString(KeyConstant.COLUMN_NAME));
+                if (tempCol == null) {
+                    if (KeyConstant.isDocumentType(column.getString(KeyConstant.COLUMN_TYPE))) {
+                        String[] name = column.getString(KeyConstant.COLUMN_NAME).split("\\.");
+                        if (name.length > 1) {
+                            Object obj;
+                            Document nestedDocument = item;
+                            for (String str : name) {
+                                obj = nestedDocument.get(str);
+                                if (obj instanceof Document) {
+                                    nestedDocument = (Document) obj;
+                                }
+                            }
+                            if (null != nestedDocument) {
+                                Document doc = nestedDocument;
+                                tempCol = doc.get(name[name.length - 1]);
+                            }
+                        }
+                    }
+                }
+                if (tempCol == null) {
+                    //continue; 这个不能直接continue会导致record到目的端错位
+                    record.addColumn(new StringColumn(null));
+                } else if (tempCol instanceof Double) {
+                    //TODO deal with Double.isNaN()
+                    record.addColumn(new DoubleColumn((Double) tempCol));
+                } else if (tempCol instanceof Boolean) {
+                    record.addColumn(new BoolColumn((Boolean) tempCol));
+                } else if (tempCol instanceof Date) {
+                    record.addColumn(new DateColumn((Date) tempCol));
+                } else if (tempCol instanceof Integer) {
+                    record.addColumn(new LongColumn((Integer) tempCol));
+                } else if (tempCol instanceof Long) {
+                    record.addColumn(new LongColumn((Long) tempCol));
+                } else {
+                    if (KeyConstant.isArrayType(column.getString(KeyConstant.COLUMN_TYPE))) {
+                        String splitter = column.getString(KeyConstant.COLUMN_SPLITTER);
+                        if (Strings.isNullOrEmpty(splitter)) {
+                            throw DataXException.asDataXException(MongoDBReaderErrorCode.ILLEGAL_VALUE,
+                                    MongoDBReaderErrorCode.ILLEGAL_VALUE.getDescription());
+                        } else {
+                            ArrayList array = (ArrayList) tempCol;
+                            String tempArrayStr = Joiner.on(splitter).join(array);
+                            record.addColumn(new StringColumn(tempArrayStr));
+                        }
+                    } else {
+                        record.addColumn(new StringColumn(tempCol.toString()));
+                    }
+                }
+            }
+            recordSender.sendToWriter(record);
+        }
     }
 }
