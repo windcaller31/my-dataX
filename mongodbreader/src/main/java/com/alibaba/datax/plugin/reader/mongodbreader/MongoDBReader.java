@@ -157,16 +157,16 @@ public class MongoDBReader extends Reader {
 
             //先进行拆解
             List<JSONObject> midList = new ArrayList<JSONObject>();
-            JSONObject syncTypeObject = (JSONObject) mongodbColumnMeta.get(0);
             String syncType = "normal";
-            if (syncTypeObject.containsKey("syncType")) {
-                syncType = syncTypeObject.getString("syncType");
+            String sync_type = readerSliceConfig.getString("syncType");
+            if (!Strings.isNullOrEmpty(sync_type)) {
+                syncType = sync_type;
             }
             JSONArray newMongodbColumnMeta = new JSONArray();
             JSONArray midMongodbColumnMeta = new JSONArray();
             //扁平化模式
             if (syncType.equals("flatten")) {
-                for (int i = 1; i < mongodbColumnMeta.size(); i++) {
+                for (int i = 0; i < mongodbColumnMeta.size(); i++) {
                     JSONObject colObject = (JSONObject) mongodbColumnMeta.get(i);
                     String type = colObject.getString("type");
                     if (type.startsWith("flatten^")) {
@@ -191,7 +191,34 @@ public class MongoDBReader extends Reader {
                         String type = colObject.getString("type");
                         String name = colObject.getString("name");
                         Object nestedObject = item.get(name);
-                        if (nestedObject instanceof Double) {
+
+                        //
+						if (nestedObject == null) {
+							if (type.equals("document")) {
+								String[] names = name.split("\\.");
+								if (names.length > 1) {
+									Object obj;
+									Document nestedDocument = item;
+									for (String str : names) {
+										obj = nestedDocument.get(str);
+										if (obj instanceof Document) {
+											nestedDocument = (Document) obj;
+										}
+									}
+									if (null != nestedDocument) {
+										Document doc = nestedDocument;
+										nestedObject = doc.get(names[names.length - 1]);
+									}
+								}
+							}
+						}
+						if (nestedObject == null) {
+							// continue; 这个不能直接continue会导致record到目的端错位
+							preJson.put(name, null);
+						}
+						//
+
+						else if (nestedObject instanceof Double) {
                             preJson.put(name, (Double) nestedObject);
                         } else if (nestedObject instanceof Boolean) {
                             preJson.put(name, (Boolean) nestedObject);
@@ -203,7 +230,10 @@ public class MongoDBReader extends Reader {
                             preJson.put(name, (Long) nestedObject);
                         } else if (nestedObject instanceof String) {
                             preJson.put(name, (String) nestedObject);
-                        } else if (type.equals("ArrayObjectLevelOne")) {
+                        } else {
+                        	preJson.put(name, nestedObject.toString());
+                        }
+						if (type.equals("ArrayObjectLevelOne")) {
                             JSONObject originJson = (JSONObject) preJson.clone();
                             RecursionDocument.getListJson(name, nestedObject, subMidList, preJson, originJson);
                         } else if (type.equals("ArrayObjectLevelTwo")) {
@@ -237,7 +267,7 @@ public class MongoDBReader extends Reader {
 
             //一般化模式
             if (syncType.equals("normal")) {
-                for (int i = 1; i < mongodbColumnMeta.size(); i++) {
+                for (int i = 0; i < mongodbColumnMeta.size(); i++) {
                     Object colObject = mongodbColumnMeta.get(i);
                     newMongodbColumnMeta.add(colObject);
                 }
